@@ -170,8 +170,8 @@ function useDialogFocus(selector = null) {
     const dialog = dialogRef.current || (selector ? document.querySelector(selector) : null)
     const previous = document.activeElement
     if (!dialog) return undefined
-    const selector = 'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-    const focusables = () => [...dialog.querySelectorAll(selector)]
+    const focusableSelector = 'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    const focusables = () => [...dialog.querySelectorAll(focusableSelector)]
     ;(focusables()[0] || dialog).focus()
     const trapFocus = (event) => {
       if (event.key !== 'Tab') return
