@@ -50,6 +50,16 @@ export function createIdleSourceState() {
   }
 }
 
+export function preserveSourceStateOnError(current = {}, error = 'unknown_error', failedAt = new Date().toISOString()) {
+  const previous = current && typeof current === 'object' ? current : createIdleSourceState()
+  return {
+    ...previous,
+    status: 'error',
+    lastErrorAt: failedAt,
+    warnings: [String(error || 'unknown_error')],
+  }
+}
+
 export function createClearedWorkspaceSnapshot() {
   return {
     activeSearch: false,

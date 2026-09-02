@@ -7,7 +7,7 @@ import { createPropertyFeatureCollection } from './domain/mapData.js'
 import { buildExplainableRecommendations } from './domain/recommendations.js'
 import { MAX_COMPARE, addComparisonIds, removeComparisonIds } from './domain/decisionState.js'
 import { getComparisonFacts, getPropertyEvidenceGaps, summarizeConstraintPreview, summarizeDecisionChange } from './domain/decisionInsights.js'
-import { CLEARED_WORKSPACE_REQUEST, WORKSPACE_STORAGE_VERSION, createAgentCandidateFilter, createClearedWorkspaceSnapshot, createIdleSourceState, createWorkspaceStorageEnvelope, parseWorkspaceStore } from './domain/workspaceState.js'
+import { CLEARED_WORKSPACE_REQUEST, WORKSPACE_STORAGE_VERSION, createAgentCandidateFilter, createClearedWorkspaceSnapshot, createIdleSourceState, createWorkspaceStorageEnvelope, parseWorkspaceStore, preserveSourceStateOnError } from './domain/workspaceState.js'
 import './styles.css'
 
 const sourceLinks = {
@@ -425,7 +425,7 @@ function App() {
       return { ...data, candidates: nextCandidates, currentSearchCandidates, sourceState: nextSourceState, returnedCount: currentSearchCandidates.length }
     } catch (error) {
       if (requestVersion === searchRequestSeqRef.current) {
-        setSourceState({ status: 'error', fetchedAt: new Date().toISOString(), totalCount: 0, warnings: [error.message] })
+        setSourceState((current) => preserveSourceStateOnError(current, error.message))
         addActivity(`查詢失敗：${error.message}`, 'system')
         showNotice('目前無法更新物件，請稍後再試')
       }
