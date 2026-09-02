@@ -1,0 +1,23 @@
+{
+  "name": "decision-map",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20 <23"
+  },
+  "scripts": {
+    "dev": "node server.mjs --dev",
+    "build": "vite build",
+    "start": "node server.mjs",
+    "preview": "npm run build && npm run start",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "maplibre-gl": "^6.6.0",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  }
+}
