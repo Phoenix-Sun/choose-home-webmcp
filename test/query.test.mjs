@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseNaturalLanguageQuery, sanitizeCriteria, toHbhousingSearchBody } from '../src/domain/query.js'
+import { CITY_CODES, CITY_OPTION_GROUPS, formatCitySelection, parseNaturalLanguageQuery, sanitizeCriteria, toHbhousingSearchBody } from '../src/domain/query.js'
 
 test('自然語言只轉成網站能正確履行的公開搜尋條件', () => {
   const criteria = parseNaturalLanguageQuery('新北市板橋區總價 1,500 萬內、兩房、距捷運 600 公尺內、價格優先')
@@ -25,6 +25,28 @@ test('條件正確映射到公開搜尋介面欄位', () => {
   assert.equal('storeID' in body, false)
   assert.equal('employeeID' in body, false)
   assert.equal('partnerNo' in body, false)
+})
+
+test('自行設定地區完整提供所有公開來源支援的縣市', () => {
+  const selectableCities = CITY_OPTION_GROUPS.flatMap((group) => group.cities).filter((city) => city !== '雙北市')
+  assert.deepEqual(new Set(selectableCities), new Set(Object.keys(CITY_CODES)))
+  assert.equal(selectableCities.length, Object.keys(CITY_CODES).length)
+})
+
+test('自然語言可同時保留多個縣市且不會誤稱雙北', () => {
+  const criteria = parseNaturalLanguageQuery('桃園市、新竹縣總價 2,000 萬內')
+  assert.deepEqual(criteria.cities, ['桃園市', '新竹縣'])
+  assert.equal(formatCitySelection(criteria.cities), '桃園市、新竹縣')
+
+  const reversed = parseNaturalLanguageQuery('先看新竹縣，再比較桃園市')
+  assert.deepEqual(reversed.cities, ['新竹縣', '桃園市'])
+})
+
+test('行政區條件會收斂到所屬縣市，避免把郵遞區號送往其他縣市', () => {
+  const criteria = sanitizeCriteria({ cities: ['台北市', '新北市'], district: '板橋區' })
+  assert.deepEqual(criteria.cities, ['新北市'])
+  assert.equal(criteria.city, '新北市')
+  assert.equal(criteria.district, '板橋區')
 })
 
 test('4 房以上是最少房數，不是精確 4 房', () => {

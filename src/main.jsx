@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url'
-import { DEFAULT_CRITERIA } from './domain/query.js'
+import { CITY_CODES, CITY_OPTION_GROUPS, DEFAULT_CRITERIA, formatCitySelection, isTwinCitySelection } from './domain/query.js'
 import { createPropertyFeatureCollection } from './domain/mapData.js'
 import { buildExplainableRecommendations } from './domain/recommendations.js'
 import { MAX_COMPARE, addComparisonIds, removeComparisonIds } from './domain/decisionState.js'
@@ -27,8 +27,8 @@ const scenarioConfig = {
 }
 
 const CONSTRAINT_SCHEMA_PROPERTIES = {
-  city: { type: 'string' },
-  cities: { type: 'array', items: { type: 'string' } },
+  city: { type: 'string', enum: Object.keys(CITY_CODES) },
+  cities: { type: 'array', items: { type: 'string', enum: Object.keys(CITY_CODES) } },
   district: { type: 'string' },
   maxPrice: { type: ['number', 'null'] },
   rooms: { type: ['integer', 'null'] },
@@ -52,7 +52,8 @@ const PROPERTY_POINT_LAYER = 'property-points'
 const PROPERTY_POINT_CENTER_LAYER = 'property-point-centers'
 const FAVORITE_STORAGE_KEY = 'choose-home.favorite-context.v1'
 const WORKSPACE_STORAGE_KEY = 'choose-home.workspace-context.v1'
-const DEFAULT_MANUAL_DRAFT = { cityGroup: '台北市', maxPrice: 1800, rooms: '', minArea: '', maxArea: '', maxAge: '', maxMrtDistance: '', requireElevator: false, requireParking: false }
+const MULTI_CITY_VALUE = '__multiple_cities__'
+const DEFAULT_MANUAL_DRAFT = { cityGroup: '台北市', cityGroupLabel: '台北市', maxPrice: 1800, rooms: '', minArea: '', maxArea: '', maxAge: '', maxMrtDistance: '', requireElevator: false, requireParking: false }
 const EMPTY_MANUAL_DRAFT = { ...DEFAULT_MANUAL_DRAFT, maxPrice: '' }
 const FAVORITE_REASONS = ['價格可以', '離捷運近', '喜歡格局', '地點適合', '屋況較新', '想再確認']
 const FAVORITE_STATUSES = [
@@ -193,7 +194,7 @@ function useDialogFocus(selector = null) {
 
 function criteriaToRequest(criteria) {
   const parts = [
-    `${criteria.cities?.length > 1 ? '雙北市' : criteria.city}${criteria.district || ''}`,
+    `${formatCitySelection(criteria.cities, criteria.city)}${criteria.district || ''}`,
     criteria.maxPrice == null ? '總價不限' : `總價 ${Number(criteria.maxPrice).toLocaleString()} 萬內`,
     criteria.rooms != null ? `${criteria.rooms} 房` : criteria.minRooms != null ? `${criteria.minRooms} 房以上` : '房數不限',
     criteria.minArea != null ? `${criteria.minArea} 坪以上` : null,
@@ -280,8 +281,10 @@ function writeWorkspaceStore(snapshot) {
 }
 
 function criteriaToManualDraft(criteria = DEFAULT_CRITERIA) {
+  const cities = criteria.cities?.length ? criteria.cities : [criteria.city].filter(Boolean)
   return {
-    cityGroup: criteria.cities?.length > 1 ? '雙北市' : criteria.city || '台北市',
+    cityGroup: isTwinCitySelection(cities) ? '雙北市' : cities.length > 1 ? MULTI_CITY_VALUE : cities[0] || '台北市',
+    cityGroupLabel: formatCitySelection(cities, criteria.city || '台北市'),
     maxPrice: criteria.maxPrice ?? '',
     rooms: criteria.rooms != null ? String(criteria.rooms) : criteria.minRooms === 4 ? '4plus' : '',
     minArea: criteria.minArea ?? '',
@@ -750,7 +753,11 @@ function App() {
       showNotice('請先輸入總價上限')
       return
     }
-    const cities = manualDraft.cityGroup === '雙北市' ? ['台北市', '新北市'] : [manualDraft.cityGroup]
+    const cities = manualDraft.cityGroup === '雙北市'
+      ? ['台北市', '新北市']
+      : manualDraft.cityGroup === MULTI_CITY_VALUE
+        ? criteria.cities
+        : [manualDraft.cityGroup]
     const next = {
       ...criteria,
       city: cities[0],
@@ -783,7 +790,7 @@ function App() {
       <main>
         <section className="hero-row"><div><h1>找到真正適合你的家</h1><p>一次比較價格、交通與生活機能，做出更安心的選擇</p></div><button type="button" className="hero-guide-link" onClick={() => setCollaborationGuideOpen(true)}>ChatGPT 能怎麼幫我？<Icon name="arrow" size={15} /></button></section>
         {aiMode ? <><AiRequestBar request={request} agentFilter={agentCandidateFilter} loadedCount={loadedCandidates.length} visibleCount={matchingCandidates.length} onClearAgentFilter={() => clearAgentCandidateFilter('user')} filtersOpen={manualFiltersOpen} onToggleFilters={() => setManualFiltersOpen((open) => !open)} />{manualFiltersOpen ? <section className="manual-filter-shell" aria-label="網站找房條件"><div className="manual-filter-heading"><div><strong>自己設定找房條件</strong><span>你與 ChatGPT 會看到同一組條件與結果</span></div></div><ManualSearchBar embedded hasActiveSearch={hasActiveSearch} draft={manualDraft} onChange={setManualDraft} onSubmit={applyManualCriteria} loading={isPreviewing || isRefreshing} /></section> : null}</> : <><ManualSearchBar hasActiveSearch={hasActiveSearch} draft={manualDraft} onChange={setManualDraft} onSubmit={applyManualCriteria} loading={isPreviewing || isRefreshing} />{agentCandidateFilter ? <ManualAgentFilterNotice filter={agentCandidateFilter} visibleCount={matchingCandidates.length} loadedCount={loadedCandidates.length} onClear={() => clearAgentCandidateFilter('user')} /> : null}</>}
-        <section className={`criteria-strip ${hasActiveSearch ? '' : 'is-empty'}`} aria-label="你的找房條件"><span className="criteria-label">你的條件</span>{hasActiveSearch ? <><span className="criteria-chip">{criteria.cities?.length > 1 ? '雙北市' : criteria.city}{criteria.district}</span>{criteria.residentialOnly ? <span className="criteria-chip"><strong>住宅</strong></span> : null}{criteria.maxPrice != null ? <span className="criteria-chip"><strong>{criteria.maxPrice.toLocaleString()}</strong> 萬內</span> : null}<span className="criteria-chip">{criteria.rooms != null ? <><strong>{criteria.rooms}</strong> 房</> : criteria.minRooms != null ? <><strong>{criteria.minRooms}</strong> 房以上</> : '房數不限'}</span>{criteria.maxMrtDistance != null ? <span className="criteria-chip">捷運 <strong>{criteria.maxMrtDistance}</strong> 公尺內</span> : null}{criteria.minArea != null ? <span className="criteria-chip"><strong>{criteria.minArea}</strong> 坪以上</span> : null}{criteria.maxArea != null ? <span className="criteria-chip"><strong>{criteria.maxArea}</strong> 坪內</span> : null}{criteria.maxAge != null ? <span className="criteria-chip">屋齡 <strong>{criteria.maxAge}</strong> 年內</span> : null}{criteria.requireElevator ? <span className="criteria-chip"><strong>電梯</strong></span> : null}{criteria.requireParking ? <span className="criteria-chip"><strong>含車位</strong></span> : null}<span className="criteria-chip">比較方式：<strong>{scenarioConfig[mode].label}</strong></span>{mode !== 'budget' ? <button type="button" className="criteria-edit" onClick={prioritizeBudget}>改成價格優先</button> : null}</> : <span className="criteria-empty">{aiMode ? '尚未設定，可自行設定或從 ChatGPT 告訴我你的需求' : '尚未設定，請使用上方欄位開始找房'}</span>}</section>
+        <section className={`criteria-strip ${hasActiveSearch ? '' : 'is-empty'}`} aria-label="你的找房條件"><span className="criteria-label">你的條件</span>{hasActiveSearch ? <><span className="criteria-chip">{formatCitySelection(criteria.cities, criteria.city)}{criteria.district}</span>{criteria.residentialOnly ? <span className="criteria-chip"><strong>住宅</strong></span> : null}{criteria.maxPrice != null ? <span className="criteria-chip"><strong>{criteria.maxPrice.toLocaleString()}</strong> 萬內</span> : null}<span className="criteria-chip">{criteria.rooms != null ? <><strong>{criteria.rooms}</strong> 房</> : criteria.minRooms != null ? <><strong>{criteria.minRooms}</strong> 房以上</> : '房數不限'}</span>{criteria.maxMrtDistance != null ? <span className="criteria-chip">捷運 <strong>{criteria.maxMrtDistance}</strong> 公尺內</span> : null}{criteria.minArea != null ? <span className="criteria-chip"><strong>{criteria.minArea}</strong> 坪以上</span> : null}{criteria.maxArea != null ? <span className="criteria-chip"><strong>{criteria.maxArea}</strong> 坪內</span> : null}{criteria.maxAge != null ? <span className="criteria-chip">屋齡 <strong>{criteria.maxAge}</strong> 年內</span> : null}{criteria.requireElevator ? <span className="criteria-chip"><strong>電梯</strong></span> : null}{criteria.requireParking ? <span className="criteria-chip"><strong>含車位</strong></span> : null}<span className="criteria-chip">比較方式：<strong>{scenarioConfig[mode].label}</strong></span>{mode !== 'budget' ? <button type="button" className="criteria-edit" onClick={prioritizeBudget}>改成價格優先</button> : null}</> : <span className="criteria-empty">{aiMode ? '尚未設定，可自行設定或從 ChatGPT 告訴我你的需求' : '尚未設定，請使用上方欄位開始找房'}</span>}</section>
         {constraintPreview ? <ConstraintPreviewPanel preview={constraintPreview} onApply={() => applyConstraintPreview(constraintPreview.previewId, 'user').catch(() => {})} onDiscard={() => discardConstraintPreview(constraintPreview.previewId)} applying={isRefreshing} /> : null}
         {!constraintPreview && decisionChange ? <DecisionChangePanel change={decisionChange} /> : null}
         <section className="workspace-grid"><MapPanel candidates={matchingCandidates} selected={selected?.outsideCurrentSearch ? null : selected} selectedId={selectedId} pinnedIds={pinnedIds} onSelect={setSelectedId} focusRequest={mapFocusRequest} criteria={criteria} loading={isRefreshing} hasActiveSearch={hasActiveSearch} /><EvidencePanel candidates={matchingCandidates} recommendations={visibleRecommendations} selected={selected?.outsideCurrentSearch ? null : selected} selectedId={selectedId} pinnedIds={pinnedIds} compareIds={compareIds} onSelect={selectCandidateFromList} onPin={togglePin} onCompare={toggleCompare} onOpenFavorites={() => setFavoritesOpen(true)} activity={activity} sourceState={sourceState} onEnrich={enrichEvidence} isEnriching={isEnriching} resultView={resultView} onResultView={setResultView} onLoadMore={loadMoreResults} isLoadingMore={isLoadingMore} hasActiveSearch={hasActiveSearch} /><InsightsPanel selected={selected?.outsideCurrentSearch ? null : selected} criteria={criteria} activity={activity} aiMode={aiMode} onOpenChecklist={() => setChecklistOpen(true)} /></section>
@@ -811,7 +818,19 @@ function ManualAgentFilterNotice({ filter, visibleCount, loadedCount, onClear })
 
 function ManualSearchBar({ draft, onChange, onSubmit, loading, hasActiveSearch, embedded = false }) {
   const update = (key) => (event) => onChange((current) => ({ ...current, [key]: event.target.type === 'checkbox' ? event.target.checked : event.target.value }))
-  return <form className={`manual-search-bar ${embedded ? 'embedded' : ''}`} onSubmit={onSubmit} aria-label="自行設定找房條件"><label><span>地區</span><select value={draft.cityGroup} onChange={update('cityGroup')}><option>台北市</option><option>新北市</option><option>雙北市</option></select></label><label><span>總價上限</span><span className="field-with-unit"><input type="number" min="1" required placeholder="請輸入" value={draft.maxPrice} onChange={update('maxPrice')} /><small>萬</small></span></label><label><span>房數</span><select value={draft.rooms} onChange={update('rooms')}><option value="">不限</option><option value="1">1 房</option><option value="2">2 房</option><option value="3">3 房</option><option value="4plus">4 房以上</option></select></label><label><span>坪數</span><span className="area-range"><input aria-label="最小坪數" type="number" min="0" placeholder="不限" value={draft.minArea} onChange={update('minArea')} /><small>至</small><input aria-label="最大坪數" type="number" min="0" placeholder="不限" value={draft.maxArea} onChange={update('maxArea')} /><small>坪</small></span></label><label><span>屋齡上限</span><span className="field-with-unit"><input type="number" min="0" placeholder="不限" value={draft.maxAge} onChange={update('maxAge')} /><small>年</small></span></label><label><span>捷運距離</span><span className="field-with-unit"><input type="number" min="0" placeholder="不限" value={draft.maxMrtDistance} onChange={update('maxMrtDistance')} /><small>公尺</small></span></label><div className="manual-checks"><label><input type="checkbox" checked={draft.requireElevator} onChange={update('requireElevator')} />需要電梯</label><label><input type="checkbox" checked={draft.requireParking} onChange={update('requireParking')} />需要車位</label></div><button className="manual-submit" type="submit" disabled={loading}>{loading ? hasActiveSearch ? '正在試算…' : '正在搜尋…' : hasActiveSearch ? '先看結果差異' : '開始找房'}</button></form>
+  return <form className={`manual-search-bar ${embedded ? 'embedded' : ''}`} onSubmit={onSubmit} aria-label="自行設定找房條件">
+    <label><span>地區</span><select value={draft.cityGroup} onChange={update('cityGroup')}>
+      {draft.cityGroup === MULTI_CITY_VALUE ? <option value={MULTI_CITY_VALUE} disabled>{draft.cityGroupLabel}（目前條件）</option> : null}
+      {CITY_OPTION_GROUPS.map((group) => <optgroup key={group.label} label={group.label}>{group.cities.map((city) => <option key={city} value={city}>{city === '雙北市' ? '雙北市（台北＋新北）' : city}</option>)}</optgroup>)}
+    </select></label>
+    <label><span>總價上限</span><span className="field-with-unit"><input type="number" min="1" required placeholder="請輸入" value={draft.maxPrice} onChange={update('maxPrice')} /><small>萬</small></span></label>
+    <label><span>房數</span><select value={draft.rooms} onChange={update('rooms')}><option value="">不限</option><option value="1">1 房</option><option value="2">2 房</option><option value="3">3 房</option><option value="4plus">4 房以上</option></select></label>
+    <label><span>坪數</span><span className="area-range"><input aria-label="最小坪數" type="number" min="0" placeholder="不限" value={draft.minArea} onChange={update('minArea')} /><small>至</small><input aria-label="最大坪數" type="number" min="0" placeholder="不限" value={draft.maxArea} onChange={update('maxArea')} /><small>坪</small></span></label>
+    <label><span>屋齡上限</span><span className="field-with-unit"><input type="number" min="0" placeholder="不限" value={draft.maxAge} onChange={update('maxAge')} /><small>年</small></span></label>
+    <label><span>捷運距離</span><span className="field-with-unit"><input type="number" min="0" placeholder="不限" value={draft.maxMrtDistance} onChange={update('maxMrtDistance')} /><small>公尺</small></span></label>
+    <div className="manual-checks"><label><input type="checkbox" checked={draft.requireElevator} onChange={update('requireElevator')} />需要電梯</label><label><input type="checkbox" checked={draft.requireParking} onChange={update('requireParking')} />需要車位</label></div>
+    <button className="manual-submit" type="submit" disabled={loading}>{loading ? hasActiveSearch ? '正在試算…' : '正在搜尋…' : hasActiveSearch ? '先看結果差異' : '開始找房'}</button>
+  </form>
 }
 
 function ConstraintPreviewPanel({ preview, onApply, onDiscard, applying }) {
@@ -871,7 +890,7 @@ function MapPanel({ candidates, selected, selectedId, pinnedIds, onSelect, focus
   propertyDataRef.current = propertyData
   const missingCount = candidates.length - validCandidates.length
   const locationSignature = useMemo(() => validCandidates.map((candidate) => `${candidate.id}:${candidate.location.lat}:${candidate.location.lon}`).join('|'), [validCandidates])
-  const locationLabel = hasActiveSearch ? `${criteria.cities?.length > 1 ? '雙北市' : criteria.city}${criteria.district ? ` · ${criteria.district}` : ''}` : '尚未設定地區'
+  const locationLabel = hasActiveSearch ? `${formatCitySelection(criteria.cities, criteria.city)}${criteria.district ? ` · ${criteria.district}` : ''}` : '尚未設定地區'
 
   const fitAllResults = useCallback((animate = true) => {
     const map = mapRef.current
@@ -1176,7 +1195,7 @@ function DecisionCard({ selected, criteria, mode, onClose }) {
   const priceLabel = criteria.maxPrice == null ? '總價不限' : `預算 ${criteria.maxPrice.toLocaleString()} 萬內`
   const mrtLabel = criteria.maxMrtDistance == null ? null : `捷運 ${criteria.maxMrtDistance} 公尺內`
   const selectedMrt = selected.mrtDistanceMeters == null ? '捷運距離未提供' : `${selected.station !== '未提供' ? selected.station : '最近捷運站'}約 ${selected.mrtDistanceMeters} 公尺`
-  return <div className="modal-backdrop" onClick={onClose}><div className="decision-modal" role="dialog" aria-modal="true" aria-label="你的選房摘要" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><h2>你的選房摘要</h2></div><button className="modal-close" onClick={onClose} aria-label="關閉"><Icon name="close" size={19} /></button></div><div className="modal-summary"><div className="summary-label">比較方式</div><strong>{scenarioConfig[mode].label}</strong><p>{criteria.city}{criteria.district} · {priceLabel} · {roomsLabel}{mrtLabel ? ` · ${mrtLabel}` : ''}</p></div><div className="modal-selected"><div className="selected-index">{selected.displayRank}</div><div><h3>{selected.name}</h3><p>{selected.address}</p><div className="summary-facts"><span><b>{selected.price.toLocaleString()}</b> 萬</span><span><b>{selected.mrtDistanceMeters ?? '—'}</b> 公尺至捷運</span><span><b>{selected.size ?? '—'}</b> 坪</span></div></div></div><div className="decision-reason"><div><Icon name="check" size={16} /><span>價格參考</span><p>{actual}</p></div><div><Icon name="check" size={16} /><span>捷運參考</span><p>{selectedMrt}</p></div><div><Icon name="check" size={16} /><span>周邊機能</span><p>{selected.tags?.length ? selected.tags.join('、') : '物件頁目前未標示'}</p></div></div><div className="modal-foot"><span><Icon name="shield" size={14} />資料僅供選房參考，不構成估價或交易建議</span><a href={selected.sourceUrl} target="_blank" rel="noreferrer">查看物件原始頁</a><button onClick={onClose}>關閉</button></div></div></div>
+  return <div className="modal-backdrop" onClick={onClose}><div className="decision-modal" role="dialog" aria-modal="true" aria-label="你的選房摘要" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><h2>你的選房摘要</h2></div><button className="modal-close" onClick={onClose} aria-label="關閉"><Icon name="close" size={19} /></button></div><div className="modal-summary"><div className="summary-label">比較方式</div><strong>{scenarioConfig[mode].label}</strong><p>{formatCitySelection(criteria.cities, criteria.city)}{criteria.district} · {priceLabel} · {roomsLabel}{mrtLabel ? ` · ${mrtLabel}` : ''}</p></div><div className="modal-selected"><div className="selected-index">{selected.displayRank}</div><div><h3>{selected.name}</h3><p>{selected.address}</p><div className="summary-facts"><span><b>{selected.price.toLocaleString()}</b> 萬</span><span><b>{selected.mrtDistanceMeters ?? '—'}</b> 公尺至捷運</span><span><b>{selected.size ?? '—'}</b> 坪</span></div></div></div><div className="decision-reason"><div><Icon name="check" size={16} /><span>價格參考</span><p>{actual}</p></div><div><Icon name="check" size={16} /><span>捷運參考</span><p>{selectedMrt}</p></div><div><Icon name="check" size={16} /><span>周邊機能</span><p>{selected.tags?.length ? selected.tags.join('、') : '物件頁目前未標示'}</p></div></div><div className="modal-foot"><span><Icon name="shield" size={14} />資料僅供選房參考，不構成估價或交易建議</span><a href={selected.sourceUrl} target="_blank" rel="noreferrer">查看物件原始頁</a><button onClick={onClose}>關閉</button></div></div></div>
 }
 
 createRoot(document.getElementById('root')).render(<App />)

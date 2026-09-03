@@ -1,3 +1,5 @@
+import { formatCitySelection } from './query.js'
+
 const CRITERIA_LABELS = {
   cities: '地區', district: '行政區', maxPrice: '總價上限', rooms: '房數', minRooms: '最少房數', minArea: '最小坪數', maxArea: '最大坪數', maxAge: '屋齡上限',
   maxMrtDistance: '捷運距離',
@@ -11,7 +13,7 @@ function sameValue(left, right) {
 }
 
 function formatCriteriaValue(key, value) {
-  if (key === 'cities') return value?.length > 1 ? '雙北市' : value?.[0] || '不限'
+  if (key === 'cities') return formatCitySelection(value)
   if (key === 'maxPrice') return value == null ? '不限' : `${Number(value).toLocaleString()} 萬`
   if (key === 'rooms') return value == null ? '不限' : `${value} 房`
   if (key === 'minRooms') return value == null ? '不限' : `${value} 房以上`

@@ -23,6 +23,26 @@ export const CITY_CODES = {
   連江縣: 25,
 }
 
+export const CITY_OPTION_GROUPS = [
+  { label: '常用', cities: ['雙北市'] },
+  { label: '北部', cities: ['基隆市', '台北市', '新北市', '桃園市', '新竹市', '新竹縣', '宜蘭縣'] },
+  { label: '中部', cities: ['苗栗縣', '台中市', '彰化縣', '南投縣', '雲林縣'] },
+  { label: '南部', cities: ['嘉義市', '嘉義縣', '台南市', '高雄市', '屏東縣'] },
+  { label: '東部與離島', cities: ['花蓮縣', '台東縣', '澎湖縣', '金門縣', '連江縣'] },
+]
+
+export function isTwinCitySelection(cities = []) {
+  const unique = [...new Set(Array.isArray(cities) ? cities : [])]
+  return unique.length === 2 && unique.includes('台北市') && unique.includes('新北市')
+}
+
+export function formatCitySelection(cities = [], fallback = '不限') {
+  const unique = [...new Set((Array.isArray(cities) ? cities : []).filter((city) => CITY_CODES[city]))]
+  if (!unique.length) return fallback
+  if (isTwinCitySelection(unique)) return '雙北市'
+  return unique.join('、')
+}
+
 export const DISTRICT_ZIP_CODES = {
   中正區: '100', 大同區: '103', 中山區: '104', 松山區: '105', 大安區: '106',
   萬華區: '108', 信義區: '110', 士林區: '111', 北投區: '112', 內湖區: '114',
@@ -78,7 +98,10 @@ export function parseNaturalLanguageQuery(text = '', base = DEFAULT_CRITERIA) {
   const ageMax = normalized.match(/屋齡\s*([0-9]+(?:\.[0-9]+)?)\s*年(?:內|以下|以內)/)
   const mrtDistanceMax = normalized.match(/(?:距(?:離)?\s*)?捷運(?:站)?\s*(?:約|步行)?\s*([0-9][0-9,]{1,4})\s*公尺(?:內|以下|以內)?/)
   const twinCities = /雙北(?:市)?/.test(normalized)
-  const city = Object.keys(CITY_CODES).find((name) => normalized.includes(name))
+  const mentionedCities = Object.keys(CITY_CODES)
+    .filter((name) => normalized.includes(name))
+    .sort((left, right) => normalized.indexOf(left) - normalized.indexOf(right))
+  const city = mentionedCities[0]
   const district = normalized.match(DISTRICT_PATTERN)?.[0] || ''
 
   if (price) next.maxPrice = numberFromMatch(price[1])
@@ -107,7 +130,7 @@ export function parseNaturalLanguageQuery(text = '', base = DEFAULT_CRITERIA) {
   } else if (city) {
     if (city !== next.city && !district) next.district = ''
     next.city = city
-    next.cities = [city]
+    next.cities = mentionedCities
   }
   if (district) next.district = district
 
@@ -136,13 +159,15 @@ export function sanitizeCriteria(input = {}) {
     return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback
   }
   const requestedDistrict = DISTRICT_ZIP_CODES[input.district] ? input.district : ''
-  const district = requestedDistrict && cities.includes(districtCity(requestedDistrict)) ? requestedDistrict : ''
+  const districtOwner = requestedDistrict ? districtCity(requestedDistrict) : null
+  const district = requestedDistrict && cities.includes(districtOwner) ? requestedDistrict : ''
+  const scopedCities = district ? [districtOwner] : cities
   let minArea = input.minArea == null ? null : finiteOr(input.minArea, null, 0, 5000)
   let maxArea = input.maxArea == null ? null : finiteOr(input.maxArea, null, 0, 5000)
   if (minArea != null && maxArea != null && minArea > maxArea) [minArea, maxArea] = [maxArea, minArea]
   return {
-    city: cities[0],
-    cities,
+    city: scopedCities[0],
+    cities: scopedCities,
     district,
     maxPrice: input.maxPrice == null ? null : finiteOr(input.maxPrice, null, 1, 200000),
     rooms: input.rooms == null ? null : finiteOr(input.rooms, DEFAULT_CRITERIA.rooms, 1, 20),

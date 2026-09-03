@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { getComparisonFacts, getPropertyEvidenceGaps, summarizeConstraintPreview, summarizeDecisionChange } from '../src/domain/decisionInsights.js'
+import { describeCriteriaChanges, getComparisonFacts, getPropertyEvidenceGaps, summarizeConstraintPreview, summarizeDecisionChange } from '../src/domain/decisionInsights.js'
 
 test('decision change reports criteria and loaded candidate movement without hiding scope', () => {
   const result = summarizeDecisionChange({
@@ -23,6 +23,13 @@ test('條件差異包含行政區、坪數與關鍵字', () => {
     nextCriteria: { cities: ['台北市'], district: '中山區', minArea: 20, maxArea: 40, keyword: '公園' },
   })
   assert.deepEqual(result.criteriaChanges.map((item) => item.key), ['district', 'minArea', 'maxArea', 'keyword'])
+})
+
+test('多縣市條件差異只在真正的台北新北組合顯示雙北', () => {
+  const twinCities = describeCriteriaChanges({ cities: ['台北市'] }, { cities: ['台北市', '新北市'] })[0]
+  const otherCities = describeCriteriaChanges({ cities: ['台北市'] }, { cities: ['桃園市', '新竹縣'] })[0]
+  assert.equal(twinCities.after, '雙北市')
+  assert.equal(otherCities.after, '桃園市、新竹縣')
 })
 
 test('constraint preview is non-mutating data with favorite impact and explicit scope', () => {
