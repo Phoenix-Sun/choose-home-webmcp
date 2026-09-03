@@ -41,7 +41,6 @@ export function createIdleSourceState() {
     totalCount: 0,
     inspectedCount: 0,
     returnedCount: 0,
-    recommendationIds: [],
     nextCursor: {},
     coverageByCity: {},
     hasMore: false,

@@ -409,7 +409,6 @@ function App() {
         totalCount: options.append ? previousSource.totalCount : data.totalCount,
         inspectedCount: options.append ? (previousSource.inspectedCount || 0) + data.inspectedCount : data.inspectedCount,
         returnedCount: nextCandidates.filter((candidate) => !candidate.outsideCurrentSearch).length,
-        recommendationIds: nextCandidates.filter((candidate) => !candidate.outsideCurrentSearch).slice(0, 10).map((candidate) => candidate.id),
         nextCursor: data.nextCursor || {},
         coverageByCity,
         hasMore: data.hasMore,
@@ -715,7 +714,7 @@ function App() {
       const state = stateRef.current
       const loaded = state.candidates.filter((candidate) => !candidate.outsideCurrentSearch)
       const visibleIds = state.agentCandidateFilter ? new Set([...state.agentCandidateFilter.candidateIds, ...state.pinnedIds]) : null
-      const { recommendationIds: _sourceRankingIds, ...sourceStatus } = state.sourceState || {}
+      const { recommendationIds: _legacySourceRankingIds, ...sourceStatus } = state.sourceState || {}
       return { activeSearch: state.hasActiveSearch, criteria: state.hasActiveSearch ? state.criteria : null, scenario: state.hasActiveSearch ? state.mode : null, selectedCandidateId: state.selectedId, pinnedCandidateIds: state.pinnedIds, compareCandidateIds: state.compareIds, loadedCandidateCount: loaded.length, visibleCandidateCount: visibleIds ? loaded.filter((candidate) => visibleIds.has(candidate.id)).length : loaded.length, agentCandidateFilter: state.agentCandidateFilter, recommendationIds: (state.recommendations || []).map((item) => item.id), latestDecisionChange: safeDecisionChange(state.decisionChange), pendingConstraintPreview: safeConstraintPreview(state.constraintPreview), sourceStatus: { ...sourceStatus, publicOnly: true, fallbackPolicy: 'fail_closed_without_synthetic_results' } }
     }
     const tools = [
