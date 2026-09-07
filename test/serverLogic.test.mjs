@@ -46,6 +46,23 @@ test('有捷運距離上限時，未知或超過距離的物件不會被當成�
   assert.deepEqual(result.map((item) => item.id), ['ok'])
 })
 
+test('行政區會以公開物件欄位再次核對，避免共用郵遞區號混入其他區', () => {
+  const criteria = sanitizeCriteria({ city: '新竹市', cities: ['新竹市'], district: '北區' })
+  const base = { propertyType: '住宅', parking: '無', style: '大樓', price: 1000, life: 60 }
+  const result = filterAndRank([
+    { ...base, id: 'north', district: '北區' },
+    { ...base, id: 'east', district: '東區' },
+  ], criteria)
+  assert.deepEqual(result.map((item) => item.id), ['north'])
+})
+
+test('公開來源使用臺字時仍能與網站行政區條件正確比對', () => {
+  const criteria = sanitizeCriteria({ city: '雲林縣', cities: ['雲林縣'], district: '台西鄉' })
+  const candidate = normalizeCandidate({ sn: 'taisi', category: '中部,雲林縣,臺西鄉', type: '住宅', price: 800 }, criteria, '2026-01-01T00:00:00Z')
+  assert.equal(candidate.district, '台西鄉')
+  assert.deepEqual(filterAndRank([candidate], criteria).map((item) => item.id), ['taisi'])
+})
+
 test('車位硬條件只接受明確有車位的公開資料', () => {
   assert.equal(hasConfirmedParking('未提供'), false)
   assert.equal(hasConfirmedParking('無車位'), false)

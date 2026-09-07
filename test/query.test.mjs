@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { CITY_CODES, CITY_OPTION_GROUPS, formatCitySelection, parseNaturalLanguageQuery, sanitizeCriteria, toHbhousingSearchBody } from '../src/domain/query.js'
+import { DISTRICT_OPTIONS_BY_CITY, getDistrictZipCode, isDistrictZipShared } from '../src/domain/districts.js'
 
 test('自然語言只轉成網站能正確履行的公開搜尋條件', () => {
   const criteria = parseNaturalLanguageQuery('新北市板橋區總價 1,500 萬內、兩房、距捷運 600 公尺內、價格優先')
@@ -31,6 +32,40 @@ test('自行設定地區完整提供所有公開來源支援的縣市', () => {
   const selectableCities = CITY_OPTION_GROUPS.flatMap((group) => group.cities).filter((city) => city !== '雙北市')
   assert.deepEqual(new Set(selectableCities), new Set(Object.keys(CITY_CODES)))
   assert.equal(selectableCities.length, Object.keys(CITY_CODES).length)
+})
+
+test('全台 22 縣市都有可配對的行政區，且每筆都有三碼代碼', () => {
+  assert.deepEqual(new Set(Object.keys(DISTRICT_OPTIONS_BY_CITY)), new Set(Object.keys(CITY_CODES)))
+  const options = Object.values(DISTRICT_OPTIONS_BY_CITY).flat()
+  assert.equal(options.length, 368)
+  assert.equal(options.every(([, zipCode]) => /^\d{3}$/.test(zipCode)), true)
+  assert.equal(getDistrictZipCode('台中市', '西屯區'), '407')
+  assert.equal(getDistrictZipCode('高雄市', '左營區'), '813')
+  assert.equal(getDistrictZipCode('花蓮縣', '花蓮市'), '970')
+  assert.equal(isDistrictZipShared('新竹市', '東區'), true)
+  assert.equal(isDistrictZipShared('嘉義市', '西區'), true)
+  assert.equal(isDistrictZipShared('台中市', '北區'), false)
+})
+
+test('重名行政區會依縣市正確配對，不會跨縣市誤用郵遞區號', () => {
+  const taichung = parseNaturalLanguageQuery('台中市北區 2,000 萬內')
+  const hsinchu = parseNaturalLanguageQuery('新竹市北區 1,500 萬內')
+  assert.equal(taichung.city, '台中市')
+  assert.equal(taichung.district, '北區')
+  assert.deepEqual(toHbhousingSearchBody(taichung).zipCode, ['404'])
+  assert.equal(hsinchu.city, '新竹市')
+  assert.equal(hsinchu.district, '北區')
+  assert.deepEqual(toHbhousingSearchBody(hsinchu).zipCode, ['300'])
+})
+
+test('沒有縣市線索的重名行政區不會被任意猜測', () => {
+  const ambiguous = sanitizeCriteria({ cities: ['台北市', '基隆市'], district: '中正區' })
+  assert.deepEqual(ambiguous.cities, ['台北市', '基隆市'])
+  assert.equal(ambiguous.district, '')
+
+  const unique = parseNaturalLanguageQuery('板橋區兩房住宅')
+  assert.equal(unique.city, '新北市')
+  assert.equal(unique.district, '板橋區')
 })
 
 test('自然語言可同時保留多個縣市且不會誤稱雙北', () => {

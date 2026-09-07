@@ -4,6 +4,7 @@ import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DEFAULT_CRITERIA, parseNaturalLanguageQuery, sanitizeCriteria, toHbhousingSearchBody } from './src/domain/query.js'
+import { isDistrictZipShared } from './src/domain/districts.js'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
 const DIST = path.join(ROOT, 'dist')
@@ -151,7 +152,7 @@ function isStandaloneParking(item) {
 }
 
 function normalizeCandidate(item, criteria, fetchedAt, sourceStatus = 'live') {
-  const category = String(item.category || '').split(',')
+  const category = String(item.category || '').split(',').map((part) => part.replaceAll('臺', '台'))
   const city = category[1] || cityNamesByCode.get(Number(item.cityNo)) || criteria.city
   const district = category[2] || ''
   const tags = publicTags(item)
@@ -217,6 +218,7 @@ function scoreCandidate(candidate, criteria) {
 
 function filterAndRank(candidates, criteria) {
   const filtered = candidates.filter((item) => {
+    if (criteria.district && item.district !== criteria.district) return false
     if (criteria.residentialOnly && (item.propertyType !== '住宅' || item.isStandaloneParking)) return false
     if (criteria.requireParking && !(item.hasConfirmedParking ?? hasConfirmedParking(item.parking))) return false
     if (criteria.requireElevator && item.hasElevatorEvidence !== true) return false
@@ -269,6 +271,7 @@ async function searchProperties(input = {}) {
     const rankedCandidates = filterAndRank(normalized, criteria)
     const candidates = rankedCandidates
     const warnings = []
+    const requiresExactDistrictPostFilter = isDistrictZipShared(criteria.city, criteria.district)
     const value = {
       ok: true,
       criteria,
@@ -283,7 +286,7 @@ async function searchProperties(input = {}) {
       resultSetComplete: Object.values(nextCursor).every((value) => value == null),
       candidates,
       warnings,
-      source: { status: 'live', provider: '公開物件來源', fetchedAt, url: `${HB_ORIGIN}/buyhouse`, cacheTtlSeconds: CACHE_TTL_MS / 1000 },
+      source: { status: 'live', provider: '公開物件來源', fetchedAt, url: `${HB_ORIGIN}/buyhouse`, cacheTtlSeconds: CACHE_TTL_MS / 1000, requiresExactDistrictPostFilter, countScope: requiresExactDistrictPostFilter ? 'postal_area_before_exact_district_check' : 'active_source_query' },
     }
     cache.set(cacheKey, { cachedAt: Date.now(), value })
     if (cache.size > 50) cache.delete(cache.keys().next().value)

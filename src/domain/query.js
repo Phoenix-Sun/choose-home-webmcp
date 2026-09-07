@@ -1,3 +1,5 @@
+import { DISTRICT_NAMES, getDistrictOptions, getDistrictOwners, getDistrictZipCode } from './districts.js'
+
 export const CITY_CODES = {
   台北市: 3,
   新北市: 4,
@@ -43,25 +45,6 @@ export function formatCitySelection(cities = [], fallback = '不限') {
   return unique.join('、')
 }
 
-export const DISTRICT_ZIP_CODES = {
-  中正區: '100', 大同區: '103', 中山區: '104', 松山區: '105', 大安區: '106',
-  萬華區: '108', 信義區: '110', 士林區: '111', 北投區: '112', 內湖區: '114',
-  南港區: '115', 文山區: '116', 萬里區: '207', 金山區: '208', 板橋區: '220',
-  汐止區: '221', 深坑區: '222', 石碇區: '223', 瑞芳區: '224', 平溪區: '226',
-  雙溪區: '227', 貢寮區: '228', 新店區: '231', 坪林區: '232', 烏來區: '233',
-  永和區: '234', 中和區: '235', 土城區: '236', 三峽區: '237', 樹林區: '238',
-  鶯歌區: '239', 三重區: '241', 新莊區: '242', 泰山區: '243', 林口區: '244',
-  蘆洲區: '247', 五股區: '248', 八里區: '249', 淡水區: '251', 三芝區: '252', 石門區: '253',
-}
-
-const TAIPEI_DISTRICTS = new Set(['中正區', '大同區', '中山區', '松山區', '大安區', '萬華區', '信義區', '士林區', '北投區', '內湖區', '南港區', '文山區'])
-
-function districtCity(district) {
-  if (TAIPEI_DISTRICTS.has(district)) return '台北市'
-  if (DISTRICT_ZIP_CODES[district]) return '新北市'
-  return null
-}
-
 export const DEFAULT_CRITERIA = {
   city: '台北市',
   cities: ['台北市'],
@@ -81,7 +64,19 @@ export const DEFAULT_CRITERIA = {
 }
 
 const ROOM_NUMBERS = { 一: 1, 二: 2, 兩: 2, 三: 3, 四: 4, 五: 5, 六: 6 }
-const DISTRICT_PATTERN = new RegExp(Object.keys(DISTRICT_ZIP_CODES).join('|'))
+const DISTRICT_PATTERN = new RegExp(DISTRICT_NAMES.join('|'))
+
+function findDistrictSelection(text, cityHints = []) {
+  const hintedOptions = getDistrictOptions(cityHints)
+  const explicit = hintedOptions.find(({ city, name }) => text.includes(`${city}${name}`))
+  if (explicit) return explicit
+  const name = text.match(DISTRICT_PATTERN)?.[0]
+  if (!name) return null
+  const hintedOwners = [...new Set(hintedOptions.filter((option) => option.name === name).map((option) => option.city))]
+  if (hintedOwners.length === 1) return { city: hintedOwners[0], name }
+  const owners = getDistrictOwners(name)
+  return owners.length === 1 ? { city: owners[0], name } : null
+}
 
 function numberFromMatch(value) {
   if (!value) return null
@@ -102,7 +97,9 @@ export function parseNaturalLanguageQuery(text = '', base = DEFAULT_CRITERIA) {
     .filter((name) => normalized.includes(name))
     .sort((left, right) => normalized.indexOf(left) - normalized.indexOf(right))
   const city = mentionedCities[0]
-  const district = normalized.match(DISTRICT_PATTERN)?.[0] || ''
+  const baseCities = Array.isArray(base.cities) && base.cities.length ? base.cities : [base.city].filter(Boolean)
+  const cityHints = twinCities ? ['台北市', '新北市'] : mentionedCities.length ? mentionedCities : baseCities
+  const districtSelection = findDistrictSelection(normalized, cityHints)
 
   if (price) next.maxPrice = numberFromMatch(price[1])
   if (room) {
@@ -128,11 +125,15 @@ export function parseNaturalLanguageQuery(text = '', base = DEFAULT_CRITERIA) {
     next.cities = ['台北市', '新北市']
     next.district = ''
   } else if (city) {
-    if (city !== next.city && !district) next.district = ''
+    if (city !== next.city && !districtSelection) next.district = ''
     next.city = city
     next.cities = mentionedCities
   }
-  if (district) next.district = district
+  if (districtSelection) {
+    next.city = districtSelection.city
+    next.cities = [districtSelection.city]
+    next.district = districtSelection.name
+  }
 
   next.requireParking = /車位|停車位|含車位/.test(normalized)
   next.requireElevator = /電梯|華廈|大樓/.test(normalized)
@@ -158,10 +159,11 @@ export function sanitizeCriteria(input = {}) {
     const parsed = Number(value)
     return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback
   }
-  const requestedDistrict = DISTRICT_ZIP_CODES[input.district] ? input.district : ''
-  const districtOwner = requestedDistrict ? districtCity(requestedDistrict) : null
-  const district = requestedDistrict && cities.includes(districtOwner) ? requestedDistrict : ''
-  const scopedCities = district ? [districtOwner] : cities
+  const requestedDistrict = String(input.district || '').trim()
+  const matchingOwners = requestedDistrict ? getDistrictOwners(requestedDistrict).filter((owner) => cities.includes(owner)) : []
+  const districtOwner = matchingOwners.length === 1 ? matchingOwners[0] : null
+  const district = districtOwner ? requestedDistrict : ''
+  const scopedCities = districtOwner ? [districtOwner] : cities
   let minArea = input.minArea == null ? null : finiteOr(input.minArea, null, 0, 5000)
   let maxArea = input.maxArea == null ? null : finiteOr(input.maxArea, null, 0, 5000)
   if (minArea != null && maxArea != null && minArea > maxArea) [minArea, maxArea] = [maxArea, minArea]
@@ -191,7 +193,7 @@ export function toHbhousingSearchBody(criteria, page = 1, pageRows = 30, cityOve
     pageRows: Math.min(30, Math.max(1, pageRows)),
     sort: safe.priority === 'budget' ? 2 : null,
     cityNo: CITY_CODES[cityOverride || safe.city],
-    zipCode: safe.district ? [DISTRICT_ZIP_CODES[safe.district]] : [],
+    zipCode: safe.district ? [getDistrictZipCode(safe.city, safe.district)] : [],
     type: safe.residentialOnly ? ['1'] : [],
     priceFinish: safe.maxPrice,
     areaType: safe.minArea != null || safe.maxArea != null ? 'B' : null,
