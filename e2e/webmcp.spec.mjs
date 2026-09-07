@@ -56,7 +56,10 @@ function searchResponse(body = {}) {
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
-    window.localStorage.clear()
+    if (!window.sessionStorage.getItem('__choose_home_e2e_initialized')) {
+      window.localStorage.clear()
+      window.sessionStorage.setItem('__choose_home_e2e_initialized', '1')
+    }
     window.__webmcpTools = []
     window.__copiedShareUrl = ''
     Object.defineProperty(document, 'modelContext', {
@@ -89,9 +92,17 @@ async function invokeTool(page, name, input = {}) {
   }, { toolName: name, toolInput: input })
 }
 
+function collectRuntimeErrors(page) {
+  const errors = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text())
+  })
+  return errors
+}
+
 test('WebMCP 查詢、完整載入、確認變更、收藏保護與分享形成同一個可見流程', async ({ page }) => {
-  const pageErrors = []
-  page.on('pageerror', (error) => pageErrors.push(error.message))
+  const pageErrors = collectRuntimeErrors(page)
   await page.goto('/?mode=ai')
   await expect(page.getByRole('heading', { name: '找到真正適合你的家' })).toBeVisible()
   await expect.poll(() => page.evaluate(() => window.__webmcpTools.map((tool) => tool.name))).toEqual(WEBMCP_TOOL_NAMES)
@@ -139,5 +150,81 @@ test('WebMCP 查詢、完整載入、確認變更、收藏保護與分享形成�
   await page.goto(sharedUrl)
   await expect(page.getByLabel('你的找房條件')).toContainText('1,600')
   await expect(page.locator('.candidate-row')).toHaveCount(1)
+  expect(pageErrors).toEqual([])
+})
+
+test('一般網站可自行搜尋、收藏筆記、重新整理及清除全部', async ({ page }) => {
+  const pageErrors = collectRuntimeErrors(page)
+  await page.goto('/?mode=manual')
+  await expect(page.getByRole('heading', { name: '找到真正適合你的家' })).toBeVisible()
+  await expect(page.getByRole('form', { name: '自行設定找房條件' })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => window.__webmcpTools.length)).toBe(0)
+
+  await page.getByLabel('縣市').selectOption('新北市')
+  await page.getByLabel('行政區').selectOption('新北市::板橋區')
+  await page.getByLabel('總價上限').fill('2500')
+  await page.getByLabel('房數').selectOption('2')
+  await page.getByLabel('屋齡上限').fill('20')
+  await page.getByLabel('捷運距離').fill('800')
+  await page.getByLabel('需要電梯').check()
+  await page.getByRole('button', { name: '先看結果差異' }).click()
+
+  await expect(page.getByRole('heading', { name: '新條件會帶來什麼變化' })).toBeVisible()
+  await expect(page.getByLabel('你的找房條件')).toContainText('台北市')
+  await page.getByRole('button', { name: '套用這組條件' }).click()
+  await expect(page.getByLabel('你的找房條件')).toContainText('新北市板橋區')
+  await expect(page.getByLabel('你的找房條件')).toContainText('2,500')
+  await expect(page.getByLabel('你的找房條件')).toContainText('2 房')
+  await expect(page.getByLabel('你的找房條件')).toContainText('800')
+
+  await page.getByRole('button', { name: '收藏物件' }).first().click()
+  await page.getByRole('button', { name: /我的收藏 1/u }).click()
+  const note = page.getByLabel('我的筆記')
+  await note.fill('週末想確認採光與管理費')
+  await page.getByRole('button', { name: '關閉' }).click()
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('choose-home.workspace-context.v1') || '{}')?.snapshot?.criteria?.city)).toBe('新北市')
+  await page.reload()
+  await expect(page.getByLabel('你的找房條件')).toContainText('新北市板橋區')
+  await page.getByRole('button', { name: /我的收藏 1/u }).click()
+  await expect(page.getByLabel('我的筆記')).toHaveValue('週末想確認採光與管理費')
+  await page.getByRole('button', { name: '關閉' }).click()
+
+  await page.getByRole('button', { name: '重新開始' }).click()
+  await page.getByRole('button', { name: '清除全部' }).click()
+  await page.getByRole('button', { name: '確定清除全部' }).click()
+  await expect(page.getByLabel('你的找房條件')).toContainText('尚未設定')
+  await expect(page.locator('.candidate-row')).toHaveCount(0)
+  await page.reload()
+  await expect(page.getByLabel('你的找房條件')).toContainText('尚未設定')
+  await expect(page.getByRole('button', { name: /我的收藏 0/u })).toBeVisible()
+  expect(pageErrors).toEqual([])
+})
+
+test('瀏覽器停用本機儲存時仍能搜尋與清除，不會白畫面', async ({ page }) => {
+  await page.addInitScript(() => {
+    const originalGetItem = Storage.prototype.getItem
+    const originalSetItem = Storage.prototype.setItem
+    const originalRemoveItem = Storage.prototype.removeItem
+    Storage.prototype.getItem = function getItem(key) {
+      if (this === window.localStorage) throw new DOMException('Storage disabled', 'SecurityError')
+      return originalGetItem.call(this, key)
+    }
+    Storage.prototype.setItem = function setItem(key, value) {
+      if (this === window.localStorage) throw new DOMException('Storage disabled', 'QuotaExceededError')
+      return originalSetItem.call(this, key, value)
+    }
+    Storage.prototype.removeItem = function removeItem(key) {
+      if (this === window.localStorage) throw new DOMException('Storage disabled', 'SecurityError')
+      return originalRemoveItem.call(this, key)
+    }
+  })
+  const pageErrors = collectRuntimeErrors(page)
+  await page.goto('/?mode=manual')
+  await expect(page.getByRole('heading', { name: '找到真正適合你的家' })).toBeVisible()
+  await expect(page.locator('.candidate-row')).toHaveCount(2)
+  await page.getByRole('button', { name: '重新開始' }).click()
+  await page.getByRole('button', { name: '清除全部' }).click()
+  await page.getByRole('button', { name: '確定清除全部' }).click()
+  await expect(page.getByLabel('你的找房條件')).toContainText('尚未設定')
   expect(pageErrors).toEqual([])
 })

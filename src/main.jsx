@@ -55,6 +55,7 @@ const PROPERTY_POINT_LAYER = 'property-points'
 const PROPERTY_POINT_CENTER_LAYER = 'property-point-centers'
 const FAVORITE_STORAGE_KEY = 'choose-home.favorite-context.v1'
 const WORKSPACE_STORAGE_KEY = 'choose-home.workspace-context.v1'
+const REQUEST_TIMEOUT_MS = 20_000
 const MULTI_CITY_VALUE = '__multiple_cities__'
 const DEFAULT_MANUAL_DRAFT = { cityGroup: '台北市', cityGroupLabel: '台北市', cities: ['台北市'], districtKey: '', maxPrice: '', rooms: '', minArea: '', maxArea: '', maxAge: '', maxMrtDistance: '', requireElevator: false, requireParking: false }
 const EMPTY_MANUAL_DRAFT = { ...DEFAULT_MANUAL_DRAFT }
@@ -112,10 +113,16 @@ function formatTime(value = new Date()) {
 }
 
 async function postJson(url, payload) {
-  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`)
-  return data
+  try {
+    const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`)
+    return data
+  } catch (error) {
+    if (error?.name === 'TimeoutError') throw new Error('查詢逾時，請稍後再試')
+    if (error instanceof TypeError) throw new Error('網路連線失敗，請檢查連線後重試')
+    throw error
+  }
 }
 
 function safeCandidate(candidate, matchesCurrentCriteria = !candidate.outsideCurrentSearch) {
@@ -268,13 +275,21 @@ function sanitizeStoredCandidate(candidate = {}) {
 }
 
 function writeFavoriteStore(favorites, items, candidates) {
-  const favoriteSet = new Set(favorites)
-  const favoriteSnapshots = candidates.filter((candidate) => favoriteSet.has(candidate.id)).map(sanitizeStoredCandidate)
-  window.localStorage.setItem(FAVORITE_STORAGE_KEY, JSON.stringify({ version: 1, favorites, items, candidates: favoriteSnapshots }))
+  try {
+    const favoriteSet = new Set(favorites)
+    const favoriteSnapshots = candidates.filter((candidate) => favoriteSet.has(candidate.id)).map(sanitizeStoredCandidate)
+    window.localStorage.setItem(FAVORITE_STORAGE_KEY, JSON.stringify({ version: 1, favorites, items, candidates: favoriteSnapshots }))
+  } catch {
+    // Private browsing or a full storage quota must not break active browsing.
+  }
 }
 
 function readWorkspaceStore() {
-  return parseWorkspaceStore(window.localStorage.getItem(WORKSPACE_STORAGE_KEY) || '')
+  try {
+    return parseWorkspaceStore(window.localStorage.getItem(WORKSPACE_STORAGE_KEY) || '')
+  } catch {
+    return { cleared: false, snapshot: null }
+  }
 }
 
 function writeWorkspaceStore(snapshot) {
@@ -282,6 +297,22 @@ function writeWorkspaceStore(snapshot) {
     window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(createWorkspaceStorageEnvelope(snapshot)))
   } catch {
     // Storage can be unavailable or full; the active page must remain usable.
+  }
+}
+
+function markWorkspaceCleared() {
+  try {
+    window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify({ version: WORKSPACE_STORAGE_VERSION, cleared: true }))
+  } catch {
+    // The in-memory cleared state remains authoritative for this page.
+  }
+}
+
+function clearFavoriteStore() {
+  try {
+    window.localStorage.removeItem(FAVORITE_STORAGE_KEY)
+  } catch {
+    // Storage can be unavailable; clearing the visible state must still succeed.
   }
 }
 
@@ -679,8 +710,8 @@ function App() {
       setIsLoadingMore(false)
       setIsPreviewing(false)
       setActivity([{ id: `clear-${Date.now()}`, time: formatTime(), text: '已清除所有收藏、比較與找房條件', type: actor === 'agent' ? 'agent' : 'user' }])
-      window.localStorage.removeItem(FAVORITE_STORAGE_KEY)
-      window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify({ version: WORKSPACE_STORAGE_VERSION, cleared: true }))
+      clearFavoriteStore()
+      markWorkspaceCleared()
       stateRef.current = { ...stateRef.current, criteria: DEFAULT_CRITERIA, mode: 'balanced', selectedId: '', pinnedIds: [], compareIds: [], favoriteMeta: {}, candidates: [], sourceState: cleared.sourceState, decisionChange: null, constraintPreview: null, agentCandidateFilter: null, hasActiveSearch: false }
       showNotice('已清除全部，可以重新設定條件')
       setIsResetting(false)
@@ -744,7 +775,7 @@ function App() {
   useEffect(() => {
     if (sourceState.status === 'loading' || isRefreshing || isLoadingMore) return
     if (!hasActiveSearch) {
-      window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify({ version: WORKSPACE_STORAGE_VERSION, cleared: true }))
+      markWorkspaceCleared()
       return
     }
     writeWorkspaceStore({ request, criteria, mode, candidates, selectedId, compareIds, resultView, decisionChange, agentCandidateFilter, activity, sourceState, hasActiveSearch: true })

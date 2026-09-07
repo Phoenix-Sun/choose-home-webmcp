@@ -121,6 +121,14 @@ test('行政區必須屬於已選縣市，坪數上下限顛倒時會正規化',
   assert.equal(valid.district, '板橋區')
 })
 
+test('明確 city 不會被不同步的舊 cities 陣列覆蓋', () => {
+  const criteria = sanitizeCriteria({ city: '新北市', cities: ['台北市'], district: '板橋區' })
+
+  assert.equal(criteria.city, '新北市')
+  assert.deepEqual(criteria.cities, ['新北市'])
+  assert.equal(criteria.district, '板橋區')
+})
+
 test('明確切換縣市時不沿用上一輪行政區', () => {
   const criteria = parseNaturalLanguageQuery('台北市 1,300 萬內兩房', {
     city: '新北市',

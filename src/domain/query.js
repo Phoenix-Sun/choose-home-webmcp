@@ -153,7 +153,8 @@ export function parseNaturalLanguageQuery(text = '', base = DEFAULT_CRITERIA) {
 export function sanitizeCriteria(input = {}) {
   const city = CITY_CODES[input.city] ? input.city : DEFAULT_CRITERIA.city
   const requestedCities = Array.isArray(input.cities) ? input.cities.filter((name) => CITY_CODES[name]) : []
-  const cities = [...new Set(requestedCities.length ? requestedCities : [city])]
+  const cityConflictsWithList = CITY_CODES[input.city] && requestedCities.length && !requestedCities.includes(input.city)
+  const cities = [...new Set(cityConflictsWithList ? [city] : requestedCities.length ? requestedCities : [city])]
   const priority = input.priority === 'commute' ? 'mrt' : ['balanced', 'budget', 'mrt'].includes(input.priority) ? input.priority : 'balanced'
   const finiteOr = (value, fallback, min, max) => {
     const parsed = Number(value)
