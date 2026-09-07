@@ -11,7 +11,9 @@
     "build": "vite build",
     "start": "node server.mjs",
     "preview": "npm run build && npm run start",
-    "test": "node --test"
+    "test": "node --test",
+    "pretest:e2e": "npm run build",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -19,5 +21,8 @@
     "react": "latest",
     "react-dom": "latest",
     "vite": "latest"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
   }
 }

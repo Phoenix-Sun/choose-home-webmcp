@@ -9,6 +9,8 @@ import { buildExplainableRecommendations } from './domain/recommendations.js'
 import { MAX_COMPARE, addComparisonIds, removeComparisonIds } from './domain/decisionState.js'
 import { getComparisonFacts, getPropertyEvidenceGaps, summarizeConstraintPreview, summarizeDecisionChange } from './domain/decisionInsights.js'
 import { CLEARED_WORKSPACE_REQUEST, WORKSPACE_STORAGE_VERSION, createAgentCandidateFilter, createClearedWorkspaceSnapshot, createIdleSourceState, createWorkspaceStorageEnvelope, parseWorkspaceStore, preserveSourceStateOnError } from './domain/workspaceState.js'
+import { buildShareUrl, readShareState, removeShareStateFromUrl } from './domain/shareState.js'
+import { validateWebMcpTools } from './domain/webmcpContract.js'
 import './styles.css'
 
 const sourceLinks = {
@@ -302,12 +304,13 @@ function criteriaToManualDraft(criteria = DEFAULT_CRITERIA) {
 }
 
 function App() {
-  const initialWorkspace = useRef(readWorkspaceStore()).current
+  const initialShareState = useRef(readShareState(window.location.search)).current
+  const initialWorkspace = useRef(initialShareState ? { cleared: false, snapshot: null } : readWorkspaceStore()).current
   const initialFavorites = useRef(readFavoriteStore()).current
   const restoredWorkspace = initialWorkspace.snapshot
   const initiallyCleared = initialWorkspace.cleared
   const initialAiMode = useRef(detectAiMode()).current
-  const initialCriteria = restoredWorkspace?.criteria || DEFAULT_CRITERIA
+  const initialCriteria = initialShareState?.criteria || restoredWorkspace?.criteria || DEFAULT_CRITERIA
   const [request, setRequest] = useState(() => initiallyCleared ? CLEARED_WORKSPACE_REQUEST : restoredWorkspace?.request || criteriaToRequest(initialCriteria))
   const [criteria, setCriteria] = useState(initialCriteria)
   const [hasActiveSearch, setHasActiveSearch] = useState(() => restoredWorkspace ? restoredWorkspace.hasActiveSearch !== false : !initiallyCleared)
@@ -318,7 +321,7 @@ function App() {
   const [pendingMode, setPendingMode] = useState(null)
   const [candidates, setCandidates] = useState(() => restoredWorkspace?.candidates || initialFavorites.candidates.map((candidate) => ({ ...candidate, displayRank: 'P', outsideCurrentSearch: true })))
   const [resultView, setResultView] = useState(() => restoredWorkspace?.resultView === 'recommended' ? 'recommended' : 'all')
-  const [selectedId, setSelectedId] = useState(() => restoredWorkspace?.selectedId || initialFavorites.favorites[0] || '')
+  const [selectedId, setSelectedId] = useState(() => initialShareState?.selectedCandidateId || restoredWorkspace?.selectedId || initialFavorites.favorites[0] || '')
   const [mapFocusRequest, setMapFocusRequest] = useState(null)
   const [pinnedIds, setPinnedIds] = useState(() => initialFavorites.favorites)
   const [compareIds, setCompareIds] = useState(() => (restoredWorkspace?.compareIds || []).filter((id) => (restoredWorkspace?.candidates || []).some((candidate) => candidate.id === id)))
@@ -334,6 +337,7 @@ function App() {
   const [sourceState, setSourceState] = useState(() => initiallyCleared ? createIdleSourceState() : restoredWorkspace?.sourceState || { status: 'loading', fetchedAt: null, totalCount: 0, warnings: [] })
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const [isLoadingAll, setIsLoadingAll] = useState(false)
   const [isEnriching, setIsEnriching] = useState(false)
   const [isPreviewing, setIsPreviewing] = useState(false)
   const [decisionCard, setDecisionCard] = useState(false)
@@ -346,6 +350,7 @@ function App() {
   const searchRequestSeqRef = useRef(0)
   const previewRequestSeqRef = useRef(0)
   const loadMoreInFlightRef = useRef(false)
+  const loadAllCancelRef = useRef(false)
   const noticeTimerRef = useRef(null)
 
   const selected = candidates.find((candidate) => candidate.id === selectedId) || candidates[0] || null
@@ -371,6 +376,12 @@ function App() {
 
   const runSearch = useCallback(async (input = {}, options = {}) => {
     const requestVersion = options.append ? searchRequestSeqRef.current : ++searchRequestSeqRef.current
+    if (!options.append) {
+      loadAllCancelRef.current = true
+      if (!options.fromShare && new URLSearchParams(window.location.search).has('share')) {
+        window.history.replaceState(null, '', removeShareStateFromUrl(window.location.href))
+      }
+    }
     if (options.append) {
       if (loadMoreInFlightRef.current) return null
       loadMoreInFlightRef.current = true
@@ -398,7 +409,11 @@ function App() {
         setDecisionCard(false)
         setChecklistOpen(false)
       }
-      setSelectedId((current) => data.candidates.some((item) => item.id === current) ? current : data.candidates[0]?.id || previousPinned[0]?.id || '')
+      setSelectedId((current) => {
+        const preferred = options.preferredCandidateId
+        if (preferred && data.candidates.some((item) => item.id === preferred)) return preferred
+        return data.candidates.some((item) => item.id === current) ? current : data.candidates[0]?.id || previousPinned[0]?.id || ''
+      })
       setCompareIds((current) => current.filter((id) => nextCandidates.some((item) => item.id === id)))
       if (!options.append && !options.silent && options.actor !== 'system' && previousCandidatesForChange.length) {
         const nextChange = summarizeDecisionChange({ previousCriteria, nextCriteria: data.criteria, previousCandidates: previousCandidatesForChange, nextCandidates: currentSearchCandidates, favoriteIds: stateRef.current.pinnedIds || [], actor: options.actor === 'user' ? 'user' : 'agent' })
@@ -526,6 +541,52 @@ function App() {
     if (!current.sourceState?.hasMore || loadMoreInFlightRef.current) return null
     return runSearch({ criteria: current.criteria, cursor: current.sourceState.nextCursor }, { append: true })
   }, [runSearch])
+
+  const loadAllResults = useCallback(async ({ actor = 'user' } = {}) => {
+    if (stateRef.current.sourceState?.resultSetComplete) {
+      return {
+        ...stateRef.current.sourceState,
+        status: 'complete',
+        sourceStatus: stateRef.current.sourceState.status,
+        batches: 0,
+      }
+    }
+    if (loadMoreInFlightRef.current || stateRef.current.isLoadingAll) return { status: 'busy' }
+    loadAllCancelRef.current = false
+    stateRef.current.isLoadingAll = true
+    setIsLoadingAll(true)
+    let batches = 0
+    let latestSource = stateRef.current.sourceState
+    try {
+      while (latestSource?.hasMore && !loadAllCancelRef.current && batches < 100) {
+        const data = await runSearch({ criteria: stateRef.current.criteria, cursor: latestSource.nextCursor }, { append: true, silent: true, actor })
+        if (!data || data.ignored) break
+        latestSource = data.sourceState
+        batches += 1
+        await new Promise((resolve) => window.setTimeout(resolve, 0))
+      }
+      const cancelled = loadAllCancelRef.current && latestSource?.hasMore
+      const status = cancelled ? 'cancelled' : latestSource?.resultSetComplete ? 'complete' : 'stopped'
+      const message = cancelled
+        ? `已停止載入，目前顯示 ${latestSource.returnedCount || 0} 間物件`
+        : latestSource?.resultSetComplete
+          ? `已檢查全部公開結果，共找到 ${latestSource.returnedCount || 0} 間符合物件`
+          : `已完成 ${batches} 批載入，目前顯示 ${latestSource?.returnedCount || 0} 間物件`
+      addActivity(message, actor === 'agent' ? 'agent' : 'user')
+      showNotice(cancelled ? '已停止載入全部' : latestSource?.resultSetComplete ? '已載入全部結果' : '已完成目前可載入結果')
+      return { ...latestSource, status, sourceStatus: latestSource?.status, batches }
+    } catch (error) {
+      return { ...stateRef.current.sourceState, status: 'error', sourceStatus: stateRef.current.sourceState?.status, error: error.message }
+    } finally {
+      stateRef.current.isLoadingAll = false
+      setIsLoadingAll(false)
+    }
+  }, [addActivity, runSearch, showNotice])
+
+  const cancelLoadAll = useCallback(() => {
+    loadAllCancelRef.current = true
+    showNotice('會在目前這批完成後停止')
+  }, [showNotice])
 
   const enrichEvidence = useCallback(async (ids) => {
     const targets = stateRef.current.candidates.filter((candidate) => ids.includes(candidate.id)).slice(0, 5)
@@ -673,8 +734,8 @@ function App() {
     })
   }, [addActivity, ensureFavoriteMeta, showNotice])
 
-  stateRef.current = { criteria, mode, selectedId, pinnedIds, compareIds, favoriteMeta, candidates, sourceState, decisionChange, constraintPreview, agentCandidateFilter, recommendations: visibleRecommendations, hasActiveSearch }
-  actionRef.current = { runSearch, loadMoreResults, enrichEvidence, previewConstraints, applyConstraintPreview, discardConstraintPreview, applyAgentCandidateFilter, clearAgentCandidateFilter, resetSearchWorkspace, addActivity, setPinnedIds, setCompareIds, setRequest, ensureFavoriteMeta }
+  stateRef.current = { criteria, mode, selectedId, pinnedIds, compareIds, favoriteMeta, candidates, sourceState, decisionChange, constraintPreview, agentCandidateFilter, recommendations: visibleRecommendations, hasActiveSearch, isLoadingAll }
+  actionRef.current = { runSearch, loadMoreResults, loadAllResults, enrichEvidence, previewConstraints, applyConstraintPreview, discardConstraintPreview, applyAgentCandidateFilter, clearAgentCandidateFilter, resetSearchWorkspace, addActivity, setPinnedIds, setCompareIds, setRequest, ensureFavoriteMeta }
 
   useEffect(() => {
     writeFavoriteStore(pinnedIds, favoriteMeta, candidates)
@@ -708,6 +769,14 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!initialShareState) return
+    runSearch({ criteria: initialShareState.criteria }, { silent: true, fromShare: true, preferredCandidateId: initialShareState.selectedCandidateId })
+      .then((data) => addActivity(`已開啟分享的找房條件，目前找到 ${data.returnedCount} 間`, 'system'))
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (initialShareState) return
     if (initiallyCleared || restoredWorkspace) return
     runSearch({ criteria: DEFAULT_CRITERIA }, { silent: true })
       .then((data) => addActivity(`已更新物件，目前找到 ${data.returnedCount} 間`, 'system'))
@@ -738,6 +807,7 @@ function App() {
       { name: 'apply_agent_candidate_filter', title: '顯示 ChatGPT 初篩結果', description: 'Apply a reversible view filter to currently loaded candidates after ChatGPT evaluates evidence that is not a native public-search field. This updates the visible request summary, map, list, and counts without pretending the heuristic is an official listing constraint. Existing favorites remain visible.', inputSchema: { type: 'object', properties: { summary: { type: 'string', description: 'Short user-facing description of the requested initial filter.' }, methodLabel: { type: 'string', description: 'Short label describing the heuristic, such as 交通快速概算.' }, scopeNote: { type: 'string', description: 'Visible limitation of the heuristic and result scope.' }, candidateIds: { type: 'array', items: { type: 'string' }, maxItems: 500 } }, required: ['summary', 'candidateIds'] }, annotations: { readOnlyHint: false, untrustedContentHint: true }, execute: async (input = {}) => actionRef.current.applyAgentCandidateFilter(input) },
       { name: 'clear_agent_candidate_filter', title: '清除 ChatGPT 初篩', description: 'Remove the reversible Agent view filter and restore every currently loaded public match without changing search constraints or favorites.', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: false, untrustedContentHint: true }, execute: async () => actionRef.current.clearAgentCandidateFilter('agent') },
       { name: 'load_more_property_results', title: '載入下一批公開物件', description: 'Fetch the next public result pages, merge matching items into the shared workspace, and immediately update the real map and result list.', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: false, untrustedContentHint: true }, execute: async () => { const data = await actionRef.current.loadMoreResults(); if (!data) return { status: 'complete_or_busy', ...currentState() }; return { status: data.ignored ? 'superseded' : 'loaded', newlyInspectedCount: data.inspectedCount, loadedCandidateCount: data.currentSearchCandidates?.length || 0, sourceStatus: data.sourceState || data.source } } },
+      { name: 'load_all_property_results', title: '載入全部公開物件', description: 'Continue fetching public result pages until the current search is complete or the user stops it. Progress remains visible on the page and every loaded match stays available.', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: false, untrustedContentHint: true }, execute: async () => actionRef.current.loadAllResults({ actor: 'agent' }) },
       { name: 'enrich_property_evidence', title: '更新物件與實價資訊', description: 'Fetch current public listing details and comparable Ministry of Interior actual-price records for up to five candidates. Missing evidence is reported explicitly.', inputSchema: { type: 'object', properties: { candidateIds: { type: 'array', items: { type: 'string' }, maxItems: 5 } }, required: ['candidateIds'] }, annotations: { readOnlyHint: false, untrustedContentHint: true }, execute: async ({ candidateIds = [] } = {}) => { const data = await actionRef.current.enrichEvidence(candidateIds); return { status: 'evidence_updated', candidates: data.candidates.map(safeCandidate) } } },
       { name: 'update_constraints', title: '立即調整找房條件', description: 'Immediately update constraints and replace the active map and result list. Use for the initial search or only when the user explicitly asks to apply without preview; otherwise call preview_constraint_change first.', inputSchema: { type: 'object', properties: CONSTRAINT_SCHEMA_PROPERTIES }, annotations: { readOnlyHint: false, untrustedContentHint: true }, execute: async (input = {}) => { const nextCriteria = { ...stateRef.current.criteria, ...input }; actionRef.current.setRequest(criteriaToRequest(nextCriteria)); const data = await actionRef.current.runSearch({ criteria: nextCriteria }); const recommendations = buildExplainableRecommendations((data.currentSearchCandidates || data.candidates || []).filter((candidate) => !candidate.outsideCurrentSearch), data.criteria.priority); return { status: data.ignored ? 'superseded' : data.source.status, criteria: data.criteria, pinnedCandidateIds: stateRef.current.pinnedIds, sourceTotalCount: data.totalCount, sourceCountScope: data.source.countScope, inspectedCount: data.inspectedCount, loadedMatchCount: data.returnedCount, resultSetComplete: data.resultSetComplete, recommendations: recommendations.map((item) => ({ ...safeCandidate(item.candidate), reasons: item.reasons })) } } },
       { name: 'reset_search_workspace', title: '重設找房條件', description: 'Reset the active criteria, result list, map, and comparison selection to the default search. Favorites and their notes are always preserved; this Agent tool cannot delete saved user decisions.', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: false, untrustedContentHint: true }, execute: async () => actionRef.current.resetSearchWorkspace({ clearSaved: false, actor: 'agent' }) },
@@ -747,7 +817,7 @@ function App() {
       { name: 'get_property_evidence_gaps', title: '讀取物件資料缺口', description: 'Return only missing, incomplete, or inferred public fields for one loaded candidate. It does not generate viewing questions or infer that a problem exists.', inputSchema: { type: 'object', properties: { candidateId: { type: 'string' } }, required: ['candidateId'] }, annotations: { readOnlyHint: true, untrustedContentHint: true }, execute: async ({ candidateId } = {}) => { const candidate = stateRef.current.candidates.find((item) => item.id === candidateId); return candidate ? { status: 'ready', candidate: safeCandidate(candidate), evidence: getPropertyEvidenceGaps(candidate) } : { status: 'not_found', candidateId } } },
     ]
     const controller = new AbortController()
-    tools.forEach((tool) => Promise.resolve(modelContext.registerTool(tool, { signal: controller.signal })).catch(() => {}))
+    validateWebMcpTools(tools).forEach((tool) => Promise.resolve(modelContext.registerTool(tool, { signal: controller.signal })).catch(() => {}))
     return () => controller.abort()
   }, [])
 
@@ -800,11 +870,29 @@ function App() {
         <section className={`criteria-strip ${hasActiveSearch ? '' : 'is-empty'}`} aria-label="你的找房條件"><span className="criteria-label">你的條件</span>{hasActiveSearch ? <><span className="criteria-chip">{formatCitySelection(criteria.cities, criteria.city)}{criteria.district}</span>{criteria.residentialOnly ? <span className="criteria-chip"><strong>住宅</strong></span> : null}{criteria.maxPrice != null ? <span className="criteria-chip"><strong>{criteria.maxPrice.toLocaleString()}</strong> 萬內</span> : null}<span className="criteria-chip">{criteria.rooms != null ? <><strong>{criteria.rooms}</strong> 房</> : criteria.minRooms != null ? <><strong>{criteria.minRooms}</strong> 房以上</> : '房數不限'}</span>{criteria.maxMrtDistance != null ? <span className="criteria-chip">捷運 <strong>{criteria.maxMrtDistance}</strong> 公尺內</span> : null}{criteria.minArea != null ? <span className="criteria-chip"><strong>{criteria.minArea}</strong> 坪以上</span> : null}{criteria.maxArea != null ? <span className="criteria-chip"><strong>{criteria.maxArea}</strong> 坪內</span> : null}{criteria.maxAge != null ? <span className="criteria-chip">屋齡 <strong>{criteria.maxAge}</strong> 年內</span> : null}{criteria.requireElevator ? <span className="criteria-chip"><strong>電梯</strong></span> : null}{criteria.requireParking ? <span className="criteria-chip"><strong>含車位</strong></span> : null}<span className="criteria-chip">比較方式：<strong>{scenarioConfig[mode].label}</strong></span>{mode !== 'budget' ? <button type="button" className="criteria-edit" onClick={prioritizeBudget}>改成價格優先</button> : null}</> : <span className="criteria-empty">{aiMode ? '尚未設定，可自行設定或從 ChatGPT 告訴我你的需求' : '尚未設定，請使用上方欄位開始找房'}</span>}</section>
         {constraintPreview ? <ConstraintPreviewPanel preview={constraintPreview} onApply={() => applyConstraintPreview(constraintPreview.previewId, 'user').catch(() => {})} onDiscard={() => discardConstraintPreview(constraintPreview.previewId)} applying={isRefreshing} /> : null}
         {!constraintPreview && decisionChange ? <DecisionChangePanel change={decisionChange} /> : null}
-        <section className="workspace-grid"><MapPanel candidates={matchingCandidates} selected={selected?.outsideCurrentSearch ? null : selected} selectedId={selectedId} pinnedIds={pinnedIds} onSelect={setSelectedId} focusRequest={mapFocusRequest} criteria={criteria} loading={isRefreshing} hasActiveSearch={hasActiveSearch} /><EvidencePanel candidates={matchingCandidates} recommendations={visibleRecommendations} selected={selected?.outsideCurrentSearch ? null : selected} selectedId={selectedId} pinnedIds={pinnedIds} compareIds={compareIds} onSelect={selectCandidateFromList} onPin={togglePin} onCompare={toggleCompare} onOpenFavorites={() => setFavoritesOpen(true)} activity={activity} sourceState={sourceState} criteria={criteria} onEnrich={enrichEvidence} isEnriching={isEnriching} resultView={resultView} onResultView={setResultView} onLoadMore={loadMoreResults} isLoadingMore={isLoadingMore} hasActiveSearch={hasActiveSearch} /><InsightsPanel selected={selected?.outsideCurrentSearch ? null : selected} criteria={criteria} activity={activity} aiMode={aiMode} onOpenChecklist={() => setChecklistOpen(true)} /></section>
+        <section className="workspace-grid"><MapPanel candidates={matchingCandidates} selected={selected?.outsideCurrentSearch ? null : selected} selectedId={selectedId} pinnedIds={pinnedIds} onSelect={setSelectedId} focusRequest={mapFocusRequest} criteria={criteria} loading={isRefreshing} hasActiveSearch={hasActiveSearch} /><EvidencePanel candidates={matchingCandidates} recommendations={visibleRecommendations} selected={selected?.outsideCurrentSearch ? null : selected} selectedId={selectedId} pinnedIds={pinnedIds} compareIds={compareIds} onSelect={selectCandidateFromList} onPin={togglePin} onCompare={toggleCompare} onOpenFavorites={() => setFavoritesOpen(true)} activity={activity} sourceState={sourceState} criteria={criteria} onEnrich={enrichEvidence} isEnriching={isEnriching} resultView={resultView} onResultView={setResultView} onLoadMore={loadMoreResults} onLoadAll={loadAllResults} onCancelLoadAll={cancelLoadAll} isLoadingMore={isLoadingMore} isLoadingAll={isLoadingAll} hasActiveSearch={hasActiveSearch} /><InsightsPanel selected={selected?.outsideCurrentSearch ? null : selected} criteria={criteria} activity={activity} aiMode={aiMode} onOpenChecklist={() => setChecklistOpen(true)} /></section>
         <DecisionRail mode={mode} pendingMode={pendingMode} onPreviewMode={previewMode} onApplyMode={applyMode} onCancelMode={() => setPendingMode(null)} pinnedCount={pinnedIds.length} candidates={matchingCandidates} onOpenFavorites={() => setFavoritesOpen(true)} onGenerate={() => setDecisionCard(true)} hasActiveSearch={hasActiveSearch} />
       </main>
       {notice ? <div className="toast"><Icon name="check" size={17} />{notice}</div> : null}
-      {decisionCard && selected && !selected.outsideCurrentSearch ? <DecisionCard selected={selected} criteria={criteria} mode={mode} onClose={() => setDecisionCard(false)} /> : null}
+      {decisionCard && selected && !selected.outsideCurrentSearch ? <DecisionCard selected={selected} criteria={criteria} mode={mode} onShare={async () => {
+        const shareUrl = buildShareUrl({ criteria, mode, selectedCandidateId: selected.id }, window.location.href)
+        try {
+          if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(shareUrl)
+          else {
+            const input = document.createElement('textarea')
+            input.value = shareUrl
+            input.style.position = 'fixed'
+            input.style.opacity = '0'
+            document.body.appendChild(input)
+            input.select()
+            document.execCommand('copy')
+            input.remove()
+          }
+          showNotice('分享連結已複製')
+        } catch (error) {
+          showNotice('目前無法複製連結，請稍後再試')
+        }
+      }} onClose={() => setDecisionCard(false)} /> : null}
       {favoritesOpen ? <FavoritesModal candidates={favoriteCandidates} favoriteMeta={favoriteMeta} onUpdate={updateFavoriteMeta} onCompare={toggleCompare} compareIds={compareIds} onClose={() => setFavoritesOpen(false)} /> : null}
       {compareOpen ? <CompareModal candidates={compareCandidates} favoriteMeta={favoriteMeta} onUpdate={updateFavoriteMeta} onRemove={toggleCompare} onClose={() => setCompareOpen(false)} /> : null}
       {checklistOpen && selected && !selected.outsideCurrentSearch ? <ViewingChecklistModal candidate={selected} onClose={() => setChecklistOpen(false)} /> : null}
@@ -1113,7 +1201,7 @@ function MapPanel({ candidates, selected, selectedId, pinnedIds, onSelect, focus
   return <section className="panel map-panel"><div className="map-head"><div className="map-count"><span>{loading ? '…' : validCandidates.length}</span> 間顯示在地圖{!loading && missingCount ? <small>另 {missingCount} 間缺少位置資料</small> : null}</div><div className="map-tools"><button aria-label="顯示全部物件" onClick={() => fitAllResults(true)} disabled={!validCandidates.length}><Icon name="target" size={17} />顯示全部</button></div></div><div className="map-canvas interactive-map-wrap"><div ref={containerRef} className="interactive-map" role="application" aria-label={`${locationLabel}物件地圖，可拖曳、縮放並點選區域或物件`} />{!validCandidates.length ? <div className="map-empty"><Icon name="target" size={25} /><strong>{hasActiveSearch ? '目前沒有可顯示位置的物件' : '尚未有物件結果'}</strong><span>{hasActiveSearch ? '你仍可從物件清單查看結果。' : '請先設定找房條件，再從地圖比較位置。'}</span></div> : null}<div className="map-area-label">{locationLabel}</div>{selected ? <div className="route-callout"><span>{selected.name}</span><small>{selected.station !== '未提供' ? `距 ${selected.station} 約 ${selected.mrtDistanceMeters ?? '—'} 公尺` : '尚無捷運距離資料'}</small></div> : null}{clusterDetails ? <div className="cluster-detail-card"><div><strong>這個區域有 {clusterDetails.count} 間</strong><button aria-label="關閉區域物件" onClick={() => setClusterDetails(null)}><Icon name="close" size={15} /></button></div><p>地圖已放大，先看看其中 {clusterDetails.items.length} 間</p><div>{clusterDetails.items.map((candidate) => <button key={candidate.id} onClick={() => { onSelect(candidate.id); mapRef.current?.easeTo({ center: [candidate.location.lon, candidate.location.lat], zoom: 16, duration: 450 }); popupRef.current?.remove(); const Maplibre = maplibreModuleRef.current; if (Maplibre) popupRef.current = new Maplibre.Popup({ offset: 14 }).setLngLat([candidate.location.lon, candidate.location.lat]).setDOMContent(propertyPopupNode(candidate)).addTo(mapRef.current); setClusterDetails(null) }}><span>{candidate.name}</span><small>{candidate.price.toLocaleString()} 萬 · {candidate.mrtDistanceMeters ?? '—'} 公尺</small></button>)}</div>{clusterDetails.count > clusterDetails.items.length ? <small>繼續放大可查看另外 {clusterDetails.count - clusterDetails.items.length} 間</small> : null}</div> : null}</div><div className="map-footer"><span><i className="legend-dot red"></i>紅色為已選／已收藏</span><span><i className="legend-dot blue"></i>數字代表這個區域的物件數</span><span className="map-footer-note">拖曳查看周邊 · 點數字放大區域</span></div></section>
 }
 
-function EvidencePanel({ candidates, recommendations, selected, selectedId, pinnedIds, compareIds, onSelect, onPin, onCompare, onOpenFavorites, activity, sourceState, criteria, onEnrich, isEnriching, resultView, onResultView, onLoadMore, isLoadingMore, hasActiveSearch }) {
+function EvidencePanel({ candidates, recommendations, selected, selectedId, pinnedIds, compareIds, onSelect, onPin, onCompare, onOpenFavorites, activity, sourceState, criteria, onEnrich, isEnriching, resultView, onResultView, onLoadMore, onLoadAll, onCancelLoadAll, isLoadingMore, isLoadingAll, hasActiveSearch }) {
   const evidenceText = selected?.actualPriceEvidence?.status === 'live' ? `同區相近條件成交 ${selected.actualPriceEvidence.count} 筆（最多 5 筆），中位單價 ${selected.actualPriceEvidence.medianUnitPrice} 萬／坪` : selected?.actualPriceEvidence?.status === 'missing' ? '同區暫無足夠相近條件成交資料' : selected?.actualPriceEvidence?.status === 'error' ? '同區成交資料更新失敗' : '選取物件後可查看同區相近條件成交'
   const recommendationById = new Map(recommendations.map((item) => [item.id, item]))
   const visibleCandidates = resultView === 'recommended' ? recommendations.map((item) => item.candidate) : candidates
@@ -1132,7 +1220,12 @@ function EvidencePanel({ candidates, recommendations, selected, selectedId, pinn
       const recommendation = recommendationById.get(candidate.id)
       return <article key={candidate.id} className={`candidate-row ${isSelected ? 'selected' : ''} ${recommendation ? 'is-recommended' : ''}`} role="button" tabIndex="0" aria-label={`選取 ${candidate.name}`} onKeyDown={(event) => { if (event.target !== event.currentTarget || !['Enter', ' '].includes(event.key)) return; event.preventDefault(); onSelect(candidate.id) }} onClick={() => onSelect(candidate.id)}><div className="candidate-name"><span className={`rank-box ${isSelected ? 'active' : ''}`}>{candidate.displayRank}</span><div><a href={candidate.sourceUrl} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}><strong>{candidate.name}</strong></a><small>{candidate.address}</small>{resultView === 'recommended' && recommendation ? <em className="recommendation-reason">{recommendation.reasons.join(' · ')}</em> : null}</div></div><div className={`candidate-price ${candidate.price < 1650 ? 'good' : ''}`}>{candidate.price.toLocaleString()}</div><div>{candidate.layout}</div><div className="commute-value"><strong>{candidate.mrtDistanceMeters != null ? `${candidate.mrtDistanceMeters} 公尺` : '—'}</strong><small>{candidate.station && candidate.station !== '未提供' ? candidate.station : '暫無捷運資料'}</small></div><div>{candidate.age != null && candidate.age >= 0 ? `${candidate.age} 年` : '—'}</div><div>{candidate.size != null ? `${candidate.size.toFixed(2)} 坪` : '—'}</div><div className="row-actions"><button title={isPinned ? '取消收藏' : '收藏物件'} className={isPinned ? 'is-pinned' : ''} onClick={(event) => { event.stopPropagation(); onPin(candidate.id) }} aria-label={isPinned ? '取消收藏' : '收藏物件'}><Icon name="heart" size={16} /></button><button title={isCompared ? '移出比較' : '加入比較'} className={isCompared ? 'is-compared' : ''} onClick={(event) => { event.stopPropagation(); onCompare(candidate.id) }} aria-label={isCompared ? '移出比較' : '加入比較'}><Icon name="compare" size={16} /></button></div></article>
     }) : <div className="candidate-empty"><strong>{hasActiveSearch ? '目前沒有完全符合的物件' : '尚未開始找房'}</strong><span>{hasActiveSearch ? '試著放寬預算、捷運距離或地區條件。' : '設定條件後，符合的公開物件會顯示在這裡。'}</span></div>}</div>
-    {sourceState.hasMore ? <button className="load-more" onClick={onLoadMore} disabled={isLoadingMore}>{isLoadingMore ? '正在尋找更多物件…' : '載入更多符合物件'}</button> : null}
+    {sourceState.hasMore || isLoadingAll ? <div className="load-result-actions">
+      <div><strong>{isLoadingAll ? '正在載入全部結果' : '還有更多公開物件'}</strong><span>已檢查 {Number(sourceState.inspectedCount || 0).toLocaleString()} / {Number(sourceState.totalCount || 0).toLocaleString()} 筆來源資料</span></div>
+      {isLoadingAll
+        ? <button className="stop-load-all" onClick={onCancelLoadAll}>停止載入</button>
+        : <><button className="load-more" onClick={onLoadMore} disabled={isLoadingMore}>載入下一批</button><button className="load-all" onClick={() => onLoadAll({ actor: 'user' })} disabled={isLoadingMore}>載入全部</button></>}
+    </div> : null}
     <div className={`evidence-source-card ${sourceState.status}`}><div className="source-icon"><Icon name="shield" size={21} /></div><div><strong>{sourceState.status === 'idle' ? '尚未搜尋物件' : sourceState.status === 'live' ? '物件資料已更新' : sourceState.status === 'snapshot' ? '目前顯示具時間標記的備援快照' : '物件資料狀態'}</strong><p>{sourceState.status === 'idle' ? '設定找房條件後，這裡會顯示資料範圍與更新狀態。' : <>{sourceState.status === 'snapshot' ? `備援快照中找到 ${sourceState.returnedCount ?? 0} 間` : sourceResultText}｜{evidenceText}</>}</p>{sourceState.status !== 'idle' ? <div className="source-links">{sourceCatalog.map((source) => <a key={source.id} href={source.url} target="_blank" rel="noreferrer">{source.short}</a>)}<small>個人開源作品，非原始資料網站官方服務</small></div> : null}</div>{sourceState.status !== 'idle' ? <Icon name="arrow" size={18} /> : null}</div>
     {sourceState.warnings?.length ? <div className="source-warning">{sourceState.warnings.join(' ')}</div> : null}
     <div className="activity-log"><div className="activity-title"><span><Icon name="clock" size={16} />最近調整</span><small>已同步到地圖與清單</small></div>{activity.slice(0, 2).map((item) => <div className="activity-item" key={item.id}><span className={`activity-icon ${item.type}`}><Icon name={item.type === 'pin' ? 'heart' : item.type === 'agent' ? 'compare' : 'check'} size={13} /></span><span>{item.type === 'agent' ? <small className="activity-source ai">ChatGPT</small> : item.type === 'user' ? <small className="activity-source user">你</small> : null}{item.text}</span><time>{item.time}</time></div>)}</div>
@@ -1216,14 +1309,14 @@ function ViewingChecklistModal({ candidate, onClose }) {
   return <div className="modal-backdrop" onClick={onClose}><section className="workspace-modal checklist-modal" role="dialog" aria-modal="true" aria-label="公開資訊待確認" onClick={(event) => event.stopPropagation()}><div className="workspace-modal-head"><div><h2>公開資訊待確認</h2><p>{candidate.name} · 僅列出目前公開資料缺口</p></div><button className="modal-close" onClick={onClose} aria-label="關閉"><Icon name="close" /></button></div><div className="checklist-body">{evidence.gaps.length ? evidence.gaps.map((item, index) => <article key={item.field}><span>{index + 1}</span><div><h3>{item.label}</h3><p>{item.detail}</p><small>資料狀態：{item.status}</small></div></article>) : <div className="evidence-complete"><Icon name="check" size={20} /><strong>目前主要公開欄位都有資料</strong><span>仍請以物件原始頁與現場確認為準。</span></div>}</div><div className="checklist-foot"><span><Icon name="shield" size={14} />資料缺口不代表物件本身有問題</span><a href={candidate.sourceUrl} target="_blank" rel="noreferrer">查看物件原始頁</a></div></section></div>
 }
 
-function DecisionCard({ selected, criteria, mode, onClose }) {
+function DecisionCard({ selected, criteria, mode, onShare, onClose }) {
   useDialogFocus('.decision-modal')
   const actual = selected.actualPriceEvidence?.status === 'live' ? `同區相近條件成交中位單價 ${selected.actualPriceEvidence.medianUnitPrice} 萬／坪（${selected.actualPriceEvidence.count} 筆）` : '尚未取得足夠可比成交，不能自行補估'
   const roomsLabel = criteria.rooms != null ? `${criteria.rooms} 房` : criteria.minRooms != null ? `${criteria.minRooms} 房以上` : '房數不限'
   const priceLabel = criteria.maxPrice == null ? '總價不限' : `預算 ${criteria.maxPrice.toLocaleString()} 萬內`
   const mrtLabel = criteria.maxMrtDistance == null ? null : `捷運 ${criteria.maxMrtDistance} 公尺內`
   const selectedMrt = selected.mrtDistanceMeters == null ? '捷運距離未提供' : `${selected.station !== '未提供' ? selected.station : '最近捷運站'}約 ${selected.mrtDistanceMeters} 公尺`
-  return <div className="modal-backdrop" onClick={onClose}><div className="decision-modal" role="dialog" aria-modal="true" aria-label="你的選房摘要" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><h2>你的選房摘要</h2></div><button className="modal-close" onClick={onClose} aria-label="關閉"><Icon name="close" size={19} /></button></div><div className="modal-summary"><div className="summary-label">比較方式</div><strong>{scenarioConfig[mode].label}</strong><p>{formatCitySelection(criteria.cities, criteria.city)}{criteria.district} · {priceLabel} · {roomsLabel}{mrtLabel ? ` · ${mrtLabel}` : ''}</p></div><div className="modal-selected"><div className="selected-index">{selected.displayRank}</div><div><h3>{selected.name}</h3><p>{selected.address}</p><div className="summary-facts"><span><b>{selected.price.toLocaleString()}</b> 萬</span><span><b>{selected.mrtDistanceMeters ?? '—'}</b> 公尺至捷運</span><span><b>{selected.size ?? '—'}</b> 坪</span></div></div></div><div className="decision-reason"><div><Icon name="check" size={16} /><span>價格參考</span><p>{actual}</p></div><div><Icon name="check" size={16} /><span>捷運參考</span><p>{selectedMrt}</p></div><div><Icon name="check" size={16} /><span>周邊機能</span><p>{selected.tags?.length ? selected.tags.join('、') : '物件頁目前未標示'}</p></div></div><div className="modal-foot"><span><Icon name="shield" size={14} />資料僅供選房參考，不構成估價或交易建議</span><a href={selected.sourceUrl} target="_blank" rel="noreferrer">查看物件原始頁</a><button onClick={onClose}>關閉</button></div></div></div>
+  return <div className="modal-backdrop" onClick={onClose}><div className="decision-modal" role="dialog" aria-modal="true" aria-label="你的選房摘要" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><h2>你的選房摘要</h2></div><button className="modal-close" onClick={onClose} aria-label="關閉"><Icon name="close" size={19} /></button></div><div className="modal-summary"><div className="summary-label">比較方式</div><strong>{scenarioConfig[mode].label}</strong><p>{formatCitySelection(criteria.cities, criteria.city)}{criteria.district} · {priceLabel} · {roomsLabel}{mrtLabel ? ` · ${mrtLabel}` : ''}</p></div><div className="modal-selected"><div className="selected-index">{selected.displayRank}</div><div><h3>{selected.name}</h3><p>{selected.address}</p><div className="summary-facts"><span><b>{selected.price.toLocaleString()}</b> 萬</span><span><b>{selected.mrtDistanceMeters ?? '—'}</b> 公尺至捷運</span><span><b>{selected.size ?? '—'}</b> 坪</span></div></div></div><div className="decision-reason"><div><Icon name="check" size={16} /><span>價格參考</span><p>{actual}</p></div><div><Icon name="check" size={16} /><span>捷運參考</span><p>{selectedMrt}</p></div><div><Icon name="check" size={16} /><span>周邊機能</span><p>{selected.tags?.length ? selected.tags.join('、') : '物件頁目前未標示'}</p></div></div><div className="share-privacy-note"><Icon name="shield" size={14} /><span>分享連結只包含這組條件與選取物件，不包含收藏和私人筆記。</span></div><div className="modal-foot"><span>資料僅供選房參考，不構成估價或交易建議</span><div><button className="share-decision-button" onClick={onShare}><Icon name="share" size={15} />複製分享連結</button><a href={selected.sourceUrl} target="_blank" rel="noreferrer">查看物件原始頁</a></div></div></div></div>
 }
 
 createRoot(document.getElementById('root')).render(<App />)
